@@ -1,0 +1,21 @@
+{
+    "remap_factor": 60,
+    "hsv_params": {
+        "group1": {
+            "H_min1": 24,
+            "H_max1": 59,
+            "S_min1": 48,
+            "S_max1": 255,
+            "V_min1": 37,
+            "V_max1": 255
+        },
+        "group2": {
+            "H_min2": 0,
+            "H_max2": 179,
+            "S_min2": 0,
+            "S_max2": 255,
+            "V_min2": 0,
+            "V_max2": 73
+        }
+    }
+} 
