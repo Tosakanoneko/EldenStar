@@ -19,8 +19,8 @@ def main():
     lidar_proc = multiprocessing.Process(target=start_rplidar_node, daemon=True)
     lidar_proc.start()
 
-    cam_debug = False
-    lidar_debug = True
+    cam_debug = True
+    lidar_debug = False
 
     cv2.namedWindow("frame", cv2.WINDOW_NORMAL)
     # cv2.namedWindow("lidar", cv2.WINDOW_NORMAL)
@@ -83,28 +83,39 @@ def main():
 
         point_cloud = pptracker.map_cloud(lidar_agent.points)
         lidar_processed = pptracker.navi(point_cloud)
+        pptracker.abs_gimble = float(sd_agent.recv_data["r2"])+pptracker.prev_angle
+        pptracker.abs_self2enemyR = pptracker.get_relative_angle(pptracker.prev_angle)+pptracker.prev_angle
+        pptracker.rel_gimble2enemyR = pptracker.abs_self2enemyR-pptracker.abs_gimble
+        # print("abs_gimble", pptracker.abs_gimble)
+        # print("abs_self2enemyR", pptracker.abs_self2enemyR)
 
+        sd_agent.short2enemy(pptracker.abs_self2enemyR)
 
-        lidar_processed = cv2.resize(lidar_processed, (300, 300))
 
         # combined = np.hstack((lidar_processed, vis_map))
         # combined = cv2.resize(combined, (600, 300))
 
-        # sd_agent.send_data["dx"] = pptracker.dest_x - pptracker.self_lidar_x
-        # sd_agent.send_data["dy"] = pptracker.dest_y - pptracker.self_lidar_y
+        # if pptracker.path_point is not None:
+        #     sd_agent.send_data["dx"] = pptracker.path_point[0] - pptracker.self_lidar_x
+        #     sd_agent.send_data["dy"] = pptracker.path_point[1] - pptracker.self_lidar_y
+        # else:
+        #     sd_agent.send_data["dx"] = 0
+        #     sd_agent.send_data["dy"] = 0
+        
         # print("dx,dy", sd_agent.send_data["dx"], sd_agent.send_data["dy"])
         if detector.missing:
-            print("lidar searching")
-            sd_agent.lidar_searching(pptracker.get_relative_angle())
+            sd_agent.lidar_searching(pptracker.rel_gimble2enemyR)
         else:
             sd_agent.send_data["px"] = detector.dpx  # 误差
             sd_agent.send_data["py"] = detector.dpy  # 误差
         # sd_agent.send_data["px"] = 0
         # sd_agent.send_data["py"] = 0
-        print(sd_agent.send_data)
+        # print(sd_agent.send_data)
+        # print(sd_agent.recv_data["r2"])
         
+        lidar_processed = cv2.resize(lidar_processed, (300, 300))
         vis_map = pptracker._map.copy()
-        vis_map = draw_entity(vis_map, pptracker)
+        vis_map = draw_entity(vis_map, pptracker, pptracker.abs_gimble)
         vis_map = cv2.resize(vis_map, (360, 360))
 
         frame = cv2.resize(frame, (480, 360))

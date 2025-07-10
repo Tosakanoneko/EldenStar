@@ -57,16 +57,20 @@ class SlaveDeviceAgent:
             "dy": 0, # 相对值
             "px": 0, # 相对值
             "py": 0, # 相对值
+            "dr1": 0, # 车体旋转角度，对地
         }
         self.recv_data = {
             "s1": 0,
             "s2": 0,
             "s3": 0,
             "s4": 0,
+            "r2": 0,
         }
         self.ser = serial.Serial(port='/dev/ttyTHS1', baudrate=115200, timeout=0.01) # ttyCH341USB0
-        self.lidar_searching_pid = PIDController(Kp=1, Ki=0, Kd=0, output_limits=(-1500, 1500))
+        self.lidar_searching_pid = PIDController(Kp=20, Ki=1, Kd=0, output_limits=(-1500, 1500))
         self.lidar_found = False
+
+        self.short2enemy_pid = PIDController(Kp=1, Ki=0, Kd=0, output_limits=(100, 100))
 
     def send_json(self):
         while True:
@@ -75,7 +79,7 @@ class SlaveDeviceAgent:
             json_data += '\r\n'
             self.ser.write(json_data.encode('utf-8'))
             # print(f"Sent: {json_data}")
-            time.sleep(0.01)
+            time.sleep(0.001)
 
     def recv_json(self):
         while True:
@@ -83,18 +87,27 @@ class SlaveDeviceAgent:
             if json_data.startswith('@'):
                 json_data = json_data[1:]
                 try:
-                    data = json.loads(json_data)
-                    print(f"Received: {data}")
+                    self.recv_data = json.loads(json_data)
+                    # print(f"Received: {self.recv_data}")
                 except json.JSONDecodeError:
                     print(f"Failed to decode JSON: {json_data}")
             else:
                 if json_data:  # 如果有非空数据但格式不对
                     print(f"Invalid data format: {json_data}")
-            time.sleep(0.1)
+            time.sleep(0.001)
 
     def lidar_searching(self, rel_angle):
-        self.send_data["px"] = -int(self.lidar_searching_pid.update(rel_angle))
+        # print(rel_angle)
+        # self.send_data["px"] = 0
+        self.send_data["px"] = int(self.lidar_searching_pid.update(-rel_angle))
         self.send_data["py"] = 0
+    
+    def short2enemy(self, rel_car_angle):
+        self.send_data["dr1"] = rel_car_angle
+        # self.send_data["dr1"] = 0
+    
+    def close_sd(self):
+        self.ser.close()
 
 class LidarAgent(Node):
     def __init__(self):
@@ -170,7 +183,7 @@ def test_eth():
         if frame is None:
             continue
         # frame = cv2.resize(frame, (640, 480))
-        # cv2.circle(frame, (320, 240), 3, (0, 255, 255), -1)
+        cv2.circle(frame, (320-39, 240-10), 3, (0, 255, 255), -1)
         cv2.imshow("frame", frame)
         key = cv2.waitKey(1)
         if key == ord('q'):

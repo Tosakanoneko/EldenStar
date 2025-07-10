@@ -7,7 +7,7 @@ import multiprocessing
 from agent import start_rplidar_node, SlaveDeviceAgent
 from agent import LidarAgent
 from utils import *
-import bisect
+import heapq
 
 class PPTracker:
     def __init__(self):
@@ -18,9 +18,12 @@ class PPTracker:
         self.prev_center = None
         self.center_alpha = 0.3   # 中心位置滤波系数
         self.self_lidar_x, self.self_lidar_y = 300, 300
-        self.targ_x, self.targ_y = 300, 300
+        self.targ_x, self.targ_y = None, None
         self.dest_x, self.dest_y = 0, 0
         self.wall_width = -20
+        self.abs_gimble = 0.0
+        self.abs_self2enemyR = 0.0
+        self.rel_gimble2enemyR = 0.0
 
         # 根据雷达安装位置调整
         self.front_offset_deg = 0   # 正值 = 逆时针
@@ -47,6 +50,14 @@ class PPTracker:
 
         self._map = draw_map()
         self._point_cloud_bg = np.zeros((600, 600), np.uint8)
+        # -------- Path planning --------
+        self.path = []            # 储存当前路径点列表 [(x1,y1), (x2,y2), ...]
+        self.path_smooth = []
+        self._prev_dest = None    # 上一次目的地坐标
+        self._prev_self = None    # 上一次自身坐标
+        self.grid_step = 10       # 网格分辨率（像素）
+        self.sample_step = 10     # 路径抽样最小间距（像素）
+        self.path_point = (self.dest_x, self.dest_y)  # 当前最近路径点
 
     def clear(self):
         self.prev_angle = 0.0
@@ -135,6 +146,144 @@ class PPTracker:
         mapped_y = max(0, min(600, local_y / side * 600))
         return int(mapped_x), int(mapped_y)
 
+    def _is_obstacle(self, x: int, y: int) -> bool:
+        """判断点 (x,y) 是否落在地雷或边界内。"""
+        # 边界检测
+        if x < 0 or x >= 600 or y < 0 or y >= 600:
+            return True
+        # 三个雷区（近似为半径 MINE_DANGER_RADIUS 的圆）
+        for cx, cy in (MINE1_COORD, MINE2_COORD, MINE3_COORD):
+            if (x - cx) ** 2 + (y - cy) ** 2 <= MINE_DANGER_RADIUS ** 2:
+                return True
+        # 新增：目标点安全半径
+        if self.targ_x is not None and self.targ_y is not None:
+            if (x - self.targ_x) ** 2 + (y - self.targ_y) ** 2 <= 100 ** 2:
+                return True
+        return False
+
+    def _astar(self, start: tuple, goal: tuple):
+        """在离散网格上使用 A* 搜索最短路径，返回离散点列表。"""
+        step = self.grid_step
+        # 将坐标对齐到网格中心
+        sx, sy = (round(start[0] / step) * step, round(start[1] / step) * step)
+        gx, gy = (round(goal[0] / step) * step, round(goal[1] / step) * step)
+        # 若目标点落在障碍内，则无法规划
+        if self._is_obstacle(gx, gy):
+            return []
+
+        open_set = []
+        heapq.heappush(open_set, (0, (sx, sy)))
+        came_from = {}
+        g_score = { (sx, sy): 0.0 }
+
+        # 8 邻域方向
+        dirs = [(-step, 0), (step, 0), (0, -step), (0, step),
+                (-step, -step), (-step, step), (step, -step), (step, step)]
+
+        def h(p):
+            return math.hypot(p[0] - gx, p[1] - gy)
+
+        closed = set()
+        while open_set:
+            _, current = heapq.heappop(open_set)
+            if current == (gx, gy):
+                # 回溯路径
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                path.reverse()
+                return path
+            if current in closed:
+                continue
+            closed.add(current)
+
+            for dx, dy in dirs:
+                nx, ny = current[0] + dx, current[1] + dy
+                neighbor = (nx, ny)
+                if self._is_obstacle(nx, ny):
+                    # 若起点位于障碍内, 允许在障碍区半径范围内继续扩展, 直到越界
+                    if math.hypot(nx - sx, ny - sy) > MINE_DANGER_RADIUS:
+                        continue
+                tentative_g = g_score[current] + math.hypot(dx, dy)
+                if tentative_g < g_score.get(neighbor, float('inf')):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    f_score = tentative_g + h(neighbor)
+                    heapq.heappush(open_set, (f_score, neighbor))
+        # 搜索失败
+        return []
+
+    def _update_path(self):
+        """当起点或终点变化时重新规划路径。"""
+        if self.dest_x is None or self.dest_y is None:
+            self.path = []
+            self.path_smooth = []
+            return
+        start = (self.self_lidar_x, self.self_lidar_y)
+        goal  = (self.dest_x, self.dest_y)
+        if start == self._prev_self and goal == self._prev_dest:
+            return  # 无变化，无需重新规划
+        raw_path = self._astar(start, goal)
+        self.path = self._chaikin(raw_path, 1) if raw_path else []
+        # 按固定步距对平滑后的路径进行抽样, 进一步减少路径点数量
+        if len(self.path) > 2:
+            self.path = self._sample_path(self.path, self.sample_step)
+        self._prev_self = start
+        self._prev_dest = goal
+
+    def _update_path_point(self):
+        """寻找 self.path 中距离车辆最近的点，写入 self.path_point。"""
+        if not self.path:
+            self.path_point = None
+            return
+        cx, cy = self.self_lidar_x, self.self_lidar_y
+        min_dist_sq = float('inf')
+        closest = self.path[-1]
+        # 新增: 记录最近点的索引, 便于在阈值内选择下一个路径点
+        closest_idx = len(self.path) - 1
+        for idx, (px, py) in enumerate(self.path):
+            d = (px - cx) ** 2 + (py - cy) ** 2
+            if d < min_dist_sq:
+                min_dist_sq = d
+                closest = (px, py)
+                closest_idx = idx
+        # 如果距离小于 10 像素且存在下一路径点, 直接指向下一路径点
+        if min_dist_sq < 64 and closest_idx + 1 < len(self.path):
+            self.path_point = self.path[closest_idx + 1]
+        else:
+            self.path_point = closest
+
+    def _chaikin(self, pts, iterations=2):
+        """对路径应用 Chaikin 曲线算法以平滑折线。"""
+        if len(pts) < 3:
+            return pts
+        import numpy as _np
+        arr = _np.array(pts, dtype=_np.float32)
+        for _ in range(iterations):
+            new_arr = [_np.copy(arr[0])]
+            for i in range(len(arr) - 1):
+                p, q = arr[i], arr[i + 1]
+                new_arr.append(0.75 * p + 0.25 * q)
+                new_arr.append(0.25 * p + 0.75 * q)
+            new_arr.append(_np.copy(arr[-1]))
+            arr = _np.array(new_arr, dtype=_np.float32)
+        return [(int(x), int(y)) for x, y in arr]
+
+    def _sample_path(self, pts, min_dist):
+        """按最小欧氏距离对路径点进行下采样."""
+        if not pts:
+            return pts
+        sampled = [pts[0]]
+        last_x, last_y = pts[0]
+        for x, y in pts[1:]:
+            if (x - last_x) ** 2 + (y - last_y) ** 2 >= min_dist * min_dist:
+                sampled.append((x, y))
+                last_x, last_y = x, y
+        if sampled[-1] != pts[-1]:
+            sampled.append(pts[-1])
+        return sampled
+
     # -------------------- 主接口 --------------------
     def navi(self, gray):
         """
@@ -143,6 +292,7 @@ class PPTracker:
         """
         corners_raw, raw_angle, raw_side = self._fit_rotated_square(gray)
         vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        # cv2.imshow("gray", gray)
         if corners_raw is None or raw_side is None or raw_angle is None:
             return vis
 
@@ -239,14 +389,37 @@ class PPTracker:
                         raw_tx, raw_ty = self._local_coord(corners_un, pt_un_targ)
                         self.targ_x, self.targ_y = 599 - raw_tx, 599 - raw_ty  # 与 self.self_lidar_x 同坐标系
                         
-                        self.dest_x = map_dest_point(self.targ_x)
-                        # self.dest_x = 149
-                        self.dest_y = 225 if self.targ_y > 299 else 375
-                        # self.dest_y = 375
+                        # 判断是否处于目标更新禁区
+                        in_forbid = (195 <= self.targ_x <= 255) or \
+                                    (345 <= self.targ_x <= 405) or \
+                                    (269 <= self.targ_y <= 329)
+                        if not in_forbid:
+                            self.dest_x = map_dest_point(self.targ_x)
+                            # 根据 targ 位置选取 dest_y, 保证目标与目的点距离 ≥ 200
+                            # 若 dest_x 无法映射, 直接回退到原逻辑
+                            if self.dest_x is None:
+                                self.dest_y = 225 if self.targ_y > 299 else 375
+                            else:
+                                cand_y1, cand_y2 = 225, 375
+                                # 若两候选都满足, 选离 targ_y 更远的; 若仅一个满足, 选满足的; 都不满足则退回原逻辑
+                                d1 = math.hypot(self.dest_x - self.targ_x, cand_y1 - self.targ_y)
+                                d2 = math.hypot(self.dest_x - self.targ_x, cand_y2 - self.targ_y)
+
+                                if d1 >= 200 and d2 >= 200:
+                                    self.dest_y = cand_y1 if abs(cand_y1 - self.targ_y) > abs(cand_y2 - self.targ_y) else cand_y2
+                                elif d1 >= 200:
+                                    self.dest_y = cand_y1
+                                elif d2 >= 200:
+                                    self.dest_y = cand_y2
+                                else:
+                                    # 退化为原逻辑: 按 targ_y 高低选择
+                                    self.dest_y = cand_y1 if self.targ_y > 299 else cand_y2
 
                         cv2.drawMarker(vis, (int(xs.mean()), int(ys.mean())), (255, 0, 0), cv2.MARKER_CROSS, 12, 2)
                         cv2.rectangle(vis, (xs.min(), ys.min()), (xs.max(), ys.max()), (255, 0, 0), 2)
-                       
+                else:
+                    self.targ_x, self.targ_y = None, None
+
 
                 # 绘制检测区域边框
                 cv2.polylines(vis, [mask_poly], True, (0, 255, 0), 2)
@@ -262,7 +435,14 @@ class PPTracker:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.circle(vis, (299, 299), 5, (0, 255, 255), -1)
 
+        while angle > 180:
+            angle -= 360
+        while angle <= -180:
+            angle += 360
         self.prev_angle = angle
+        # 在返回之前更新路径及最近路径点
+        self._update_path()
+        self._update_path_point()
         return vis
 
     def map_cloud(self, points):
@@ -282,8 +462,12 @@ class PPTracker:
         point_cloud[289:310, 289:310] = 0
 
         return point_cloud
-    def get_relative_angle(self):
+
+    def get_relative_angle(self, angle):
         """返回目标点相对车头的旋转角度（顺时针 0~180°, 逆时针 0~-180°）"""
+        if self.targ_x is None or self.targ_y is None:
+            return 0
+
         dx = self.targ_x - self.self_lidar_x
         dy = self.targ_y - self.self_lidar_y
         if dx == 0 and dy == 0:
@@ -291,7 +475,7 @@ class PPTracker:
 
         bearing = math.degrees(math.atan2(-dy, dx))
 
-        heading = self.prev_angle
+        heading = angle
 
         rel_angle = bearing - heading - 90
 
@@ -304,6 +488,7 @@ class PPTracker:
 
 def main():
     rclpy.init()
+    multiprocessing.set_start_method("spawn", force=True)
     lidar_proc = multiprocessing.Process(target=start_rplidar_node, daemon=True)
     lidar_proc.start()
 
@@ -324,49 +509,55 @@ def main():
     cv2.namedWindow('frame', cv2.WINDOW_NORMAL)
     cv2.setWindowProperty('frame', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
 
-    try:
-        while True:
-            # 处理一次雷达回调（非阻塞）
-            rclpy.spin_once(lidar_agent, timeout_sec=0.0)
+    while True:
+        start_time = time.time()
+        # 处理一次雷达回调（非阻塞）
+        rclpy.spin_once(lidar_agent, timeout_sec=0.0)
 
-            point_cloud = pptracker.map_cloud(lidar_agent.points)
+        point_cloud = pptracker.map_cloud(lidar_agent.points)
 
-            frame = pptracker.navi(point_cloud)
+        frame = pptracker.navi(point_cloud)
+        
 
-            print(pptracker.get_relative_angle())
-            # agent.send_packet(data)
+        # agent.send_packet(data)
 
-            vis_map = pptracker._map.copy()
-            vis_map = draw_entity(vis_map, pptracker)
-            # sd_agent.send_data["dx"] = pptracker.dest_x - pptracker.self_lidar_x
-            # sd_agent.send_data["dy"] = pptracker.dest_y - pptracker.self_lidar_y
+        vis_map = pptracker._map.copy()
+        vis_map = draw_entity(vis_map, pptracker, pptracker.abs_gimble)
+
+        pptracker.abs_self2enemyR = pptracker.get_relative_angle(pptracker.prev_angle)+pptracker.prev_angle
+        sd_agent.short2enemy(pptracker.abs_self2enemyR)
+        # print(sd_agent.send_data["dr1"])
+        if pptracker.path_point is not None:
+            sd_agent.send_data["dx"] = (pptracker.path_point[0] - pptracker.self_lidar_x)*-4
+            sd_agent.send_data["dy"] = (pptracker.path_point[1] - pptracker.self_lidar_y)*-4
+            print("dx,dy,dr1", sd_agent.send_data["dx"], sd_agent.send_data["dy"], sd_agent.send_data["dr1"])
+        else:
             sd_agent.send_data["dx"] = 0
             sd_agent.send_data["dy"] = 0
-            # print("dx,dy", sd_agent.send_data["dx"], sd_agent.send_data["dy"])
-            sd_agent.send_data["px"] = 0
-            sd_agent.send_data["py"] = 0
 
-            combined = np.hstack((frame, vis_map))
-            combined = cv2.resize(combined, (750, 375))
-            cv2.imshow('frame', combined)
-            cv2.setWindowProperty('frame', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+        # print("dx,dy", sd_agent.send_data["dx"], sd_agent.send_data["dy"])
 
-            key = cv2.waitKey(1)
-            if key == 27:                       # Esc → 退出
-                break
-            elif key == ord('r') or lidar_agent.calib:
-                pptracker.clear()
-                lidar_agent.calib = False
-                print('重置偏移角度')
-            elif key == ord('s'):
-                print('开始冲线')
 
-    except KeyboardInterrupt:
-        print('程序被中断，退出…')
+        combined = np.hstack((frame, vis_map))
+        combined = cv2.resize(combined, (750, 375))
+        cv2.imshow('frame', combined)
+        cv2.setWindowProperty('frame', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
 
-    finally:
-        cv2.destroyAllWindows()
-        # 结束 rplidar_node 子进程
+        key = cv2.waitKey(1)
+        if key == 27:                       # Esc → 退出
+            break
+        elif key == ord('r') or lidar_agent.calib:
+            pptracker.clear()
+            lidar_agent.calib = False
+            print('重置偏移角度')
+        elif key == ord('s'):
+            print('开始冲线')
+
+        end_time = time.time()
+        print(f"Time taken: {end_time - start_time:.2f} seconds")
+
+    cv2.destroyAllWindows()
+    # 结束 rplidar_node 子进程
     if lidar_proc.is_alive():
         lidar_proc.terminate()
         lidar_proc.join()

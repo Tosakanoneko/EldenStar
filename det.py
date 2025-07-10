@@ -8,8 +8,8 @@ import agent
 from utils import PIDController
 import time
 
-FRAME_CX = 320
-FRAME_CY = 240
+FRAME_CX = 320 - 39
+FRAME_CY = 240 - 10
 
 def overlay_masks(frame, mask, alpha=0.2):
     mask_3c = (mask[..., None] > 0.5).astype(np.uint8) * np.asarray((255,0,255), np.uint8)
@@ -139,6 +139,7 @@ class Detector:
                 dpy = self.py - FRAME_CY
         else:
             self.missing = True
+            print("missing,reset pid")
             self.pid_x.reset()
             self.pid_y.reset()
 
