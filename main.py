@@ -7,6 +7,7 @@ import rclpy
 from agent import LidarAgent
 from utils import *
 from nav import PPTracker
+import math
 
 def main():
     rclpy.init()
@@ -23,19 +24,18 @@ def main():
     lidar_debug = False
 
     cv2.namedWindow("frame", cv2.WINDOW_NORMAL)
-    # cv2.namedWindow("lidar", cv2.WINDOW_NORMAL)
     cv2.setWindowProperty('frame', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
-    # cv2.setWindowProperty('lidar', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
-    cv2.namedWindow("pid", cv2.WINDOW_NORMAL)
 
     if cam_debug:
-        cv2.createTrackbar("Kp_x*10", "pid", int(detector.pid_x.Kp*10), 200, lambda x: None)
-        cv2.createTrackbar("Ki_x*10", "pid", int(detector.pid_x.Ki*10), 200, lambda x: None)
-        cv2.createTrackbar("Kd_x*10", "pid", int(detector.pid_x.Kd*10), 200, lambda x: None)
-        cv2.createTrackbar("Kp_y*10", "pid", int(detector.pid_y.Kp*10), 200, lambda x: None)
-        cv2.createTrackbar("Ki_y*10", "pid", int(detector.pid_y.Ki*10), 200, lambda x: None)
-        cv2.createTrackbar("Kd_y*10", "pid", int(detector.pid_y.Kd*10), 200, lambda x: None)
+        cv2.namedWindow("pid", cv2.WINDOW_NORMAL)
+        cv2.createTrackbar("Kp_x*10", "pid", int(detector.pid_far_x.Kp*10), 200, lambda x: None)
+        cv2.createTrackbar("Ki_x*10", "pid", int(detector.pid_far_x.Ki*10), 200, lambda x: None)
+        cv2.createTrackbar("Kd_x*10", "pid", int(detector.pid_far_x.Kd*10), 200, lambda x: None)
+        cv2.createTrackbar("Kp_y*10", "pid", int(detector.pid_far_y.Kp*10), 200, lambda x: None)
+        cv2.createTrackbar("Ki_y*10", "pid", int(detector.pid_far_y.Ki*10), 200, lambda x: None)
+        cv2.createTrackbar("Kd_y*10", "pid", int(detector.pid_far_y.Kd*10), 200, lambda x: None)
     if lidar_debug:
+        cv2.namedWindow("pid", cv2.WINDOW_NORMAL)
         cv2.createTrackbar("Kp_x*10", "pid", int(sd_agent.lidar_searching_pid.Kp*10), 200, lambda x: None)
         cv2.createTrackbar("Ki_x*10", "pid", int(sd_agent.lidar_searching_pid.Ki*10), 200, lambda x: None)
         cv2.createTrackbar("Kd_x*10", "pid", int(sd_agent.lidar_searching_pid.Kd*10), 200, lambda x: None)
@@ -56,21 +56,23 @@ def main():
 
     while True:
         frame = client.rcv_frame()
-        # frame = cv2.imread("white.jpg")
-        # frame = cv2.resize(frame, (640, 480))
         if frame is None:
             pass
 
-        frame = detector.process_frame(frame)
+        if pptracker.targ_x is not None and pptracker.targ_y is not None:
+            dist = math.sqrt((pptracker.targ_x-pptracker.self_lidar_x)**2 + (pptracker.targ_y-pptracker.self_lidar_y)**2)
+        else:
+            dist = 300
+        frame = detector.track_point(frame, dist)
 
 
         if cam_debug:
-            detector.pid_x.Kp = cv2.getTrackbarPos("Kp_x*10", "pid") / 10
-            detector.pid_x.Ki = cv2.getTrackbarPos("Ki_x*10", "pid") / 10
-            detector.pid_x.Kd = cv2.getTrackbarPos("Kd_x*10", "pid") / 10
-            detector.pid_y.Kp = cv2.getTrackbarPos("Kp_y*10", "pid") / 10
-            detector.pid_y.Ki = cv2.getTrackbarPos("Ki_y*10", "pid") / 10
-            detector.pid_y.Kd = cv2.getTrackbarPos("Kd_y*10", "pid") / 10
+            detector.pid_far_x.Kp = cv2.getTrackbarPos("Kp_x*10", "pid") / 10
+            detector.pid_far_x.Ki = cv2.getTrackbarPos("Ki_x*10", "pid") / 10
+            detector.pid_far_x.Kd = cv2.getTrackbarPos("Kd_x*10", "pid") / 10
+            detector.pid_far_y.Kp = cv2.getTrackbarPos("Kp_y*10", "pid") / 10
+            detector.pid_far_y.Ki = cv2.getTrackbarPos("Ki_y*10", "pid") / 10
+            detector.pid_far_y.Kd = cv2.getTrackbarPos("Kd_y*10", "pid") / 10
         if lidar_debug:
             sd_agent.lidar_searching_pid.Kp = cv2.getTrackbarPos("Kp_x*10", "pid") / 10
             sd_agent.lidar_searching_pid.Ki = cv2.getTrackbarPos("Ki_x*10", "pid") / 10
@@ -86,32 +88,24 @@ def main():
         pptracker.abs_gimble = float(sd_agent.recv_data["r2"])+pptracker.prev_angle
         pptracker.abs_self2enemyR = pptracker.get_relative_angle(pptracker.prev_angle)+pptracker.prev_angle
         pptracker.rel_gimble2enemyR = pptracker.abs_self2enemyR-pptracker.abs_gimble
-        # print("abs_gimble", pptracker.abs_gimble)
-        # print("abs_self2enemyR", pptracker.abs_self2enemyR)
+
 
         sd_agent.short2enemy(pptracker.abs_self2enemyR)
 
-
-        # combined = np.hstack((lidar_processed, vis_map))
-        # combined = cv2.resize(combined, (600, 300))
-
-        # if pptracker.path_point is not None:
-        #     sd_agent.send_data["dx"] = pptracker.path_point[0] - pptracker.self_lidar_x
-        #     sd_agent.send_data["dy"] = pptracker.path_point[1] - pptracker.self_lidar_y
-        # else:
-        #     sd_agent.send_data["dx"] = 0
-        #     sd_agent.send_data["dy"] = 0
+        if pptracker.path_point is not None:
+            sd_agent.send_data["dx"] = (pptracker.path_point[0] - pptracker.self_lidar_x)*-4
+            sd_agent.send_data["dy"] = (pptracker.path_point[1] - pptracker.self_lidar_y)*-4
+            print("dx,dy,dr1", sd_agent.send_data["dx"], sd_agent.send_data["dy"], sd_agent.send_data["dr1"])
+        else:
+            sd_agent.send_data["dx"] = 0
+            sd_agent.send_data["dy"] = 0
         
-        # print("dx,dy", sd_agent.send_data["dx"], sd_agent.send_data["dy"])
         if detector.missing:
             sd_agent.lidar_searching(pptracker.rel_gimble2enemyR)
         else:
             sd_agent.send_data["px"] = detector.dpx  # 误差
             sd_agent.send_data["py"] = detector.dpy  # 误差
-        # sd_agent.send_data["px"] = 0
-        # sd_agent.send_data["py"] = 0
-        # print(sd_agent.send_data)
-        # print(sd_agent.recv_data["r2"])
+        
         
         lidar_processed = cv2.resize(lidar_processed, (300, 300))
         vis_map = pptracker._map.copy()
@@ -121,10 +115,8 @@ def main():
         frame = cv2.resize(frame, (480, 360))
         combined = np.hstack((frame, vis_map))
         cv2.imshow("frame", combined)
-        # cv2.imshow("lidar", combined)
         if cv2.waitKey(1) == 27:
             break
-        # elif cv2.waitKey(1) & 0xFF == ord('s'):
 
     # 释放资源
     client.close()

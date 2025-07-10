@@ -18,7 +18,7 @@ class PPTracker:
         self.prev_center = None
         self.center_alpha = 0.3   # 中心位置滤波系数
         self.self_lidar_x, self.self_lidar_y = 300, 300
-        self.targ_x, self.targ_y = None, None
+        self.targ_x, self.targ_y = 299, 399
         self.dest_x, self.dest_y = 0, 0
         self.wall_width = -20
         self.abs_gimble = 0.0
@@ -159,7 +159,19 @@ class PPTracker:
         if self.targ_x is not None and self.targ_y is not None:
             if (x - self.targ_x) ** 2 + (y - self.targ_y) ** 2 <= 100 ** 2:
                 return True
+        # 新增：中央矩形障碍区 (75,225)-(525,375)
+        if 65 <= x <= 535 and 215 <= y <= 385:
+            return True
         return False
+
+    def _in_self_region(self, x: int, y: int) -> bool:
+        """判断点 (x, y) 是否位于车辆自身占据的区域（car_box 或以 self_lidar_x/y 为圆心的近似圆形）内。"""
+        if hasattr(self, "car_box") and self.car_box is not None and self.car_box.shape == (4, 2):
+            # pointPolygonTest:  返回  >0 表示在内部, 0 表示在边界, <0 表示在外部
+            return cv2.pointPolygonTest(self.car_box.astype(np.float32), (float(x), float(y)), False) >= 0
+        # 若 car_box 暂不可用, 退化为以车辆最大半径的圆形近似
+        r = max(self.car_width, self.car_length) / 2.0
+        return (x - self.self_lidar_x) ** 2 + (y - self.self_lidar_y) ** 2 <= r * r
 
     def _astar(self, start: tuple, goal: tuple):
         """在离散网格上使用 A* 搜索最短路径，返回离散点列表。"""
@@ -233,26 +245,36 @@ class PPTracker:
         self._prev_dest = goal
 
     def _update_path_point(self):
-        """寻找 self.path 中距离车辆最近的点，写入 self.path_point。"""
+        """寻找 self.path 中距离车辆最近且位于车辆外的点，写入 self.path_point。"""
         if not self.path:
             self.path_point = None
             return
         cx, cy = self.self_lidar_x, self.self_lidar_y
         min_dist_sq = float('inf')
-        closest = self.path[-1]
-        # 新增: 记录最近点的索引, 便于在阈值内选择下一个路径点
-        closest_idx = len(self.path) - 1
+        closest = None
+        closest_idx = -1
         for idx, (px, py) in enumerate(self.path):
+            # 跳过位于车辆自身区域内的点
+            if self._in_self_region(px, py):
+                continue
             d = (px - cx) ** 2 + (py - cy) ** 2
             if d < min_dist_sq:
                 min_dist_sq = d
                 closest = (px, py)
                 closest_idx = idx
-        # 如果距离小于 10 像素且存在下一路径点, 直接指向下一路径点
-        if min_dist_sq < 64 and closest_idx + 1 < len(self.path):
-            self.path_point = self.path[closest_idx + 1]
-        else:
-            self.path_point = closest
+        # 若所有路径点均在车辆自身区域内, 则回退到最后一个路径点
+        if closest is None:
+            self.path_point = self.path[-1]
+            return
+        # 如果最近点距离过近且存在下一有效路径点, 直接指向下一个
+        if min_dist_sq < 4:
+            next_idx = closest_idx + 1
+            while next_idx < len(self.path) and self._in_self_region(*self.path[next_idx]):
+                next_idx += 1
+            if next_idx < len(self.path):
+                self.path_point = self.path[next_idx]
+                return
+        self.path_point = closest
 
     def _chaikin(self, pts, iterations=2):
         """对路径应用 Chaikin 曲线算法以平滑折线。"""
@@ -292,7 +314,7 @@ class PPTracker:
         """
         corners_raw, raw_angle, raw_side = self._fit_rotated_square(gray)
         vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        # cv2.imshow("gray", gray)
+        cv2.imshow("gray", gray)
         if corners_raw is None or raw_side is None or raw_angle is None:
             return vis
 
@@ -395,30 +417,14 @@ class PPTracker:
                                     (269 <= self.targ_y <= 329)
                         if not in_forbid:
                             self.dest_x = map_dest_point(self.targ_x)
-                            # 根据 targ 位置选取 dest_y, 保证目标与目的点距离 ≥ 200
-                            # 若 dest_x 无法映射, 直接回退到原逻辑
-                            if self.dest_x is None:
-                                self.dest_y = 225 if self.targ_y > 299 else 375
-                            else:
-                                cand_y1, cand_y2 = 225, 375
-                                # 若两候选都满足, 选离 targ_y 更远的; 若仅一个满足, 选满足的; 都不满足则退回原逻辑
-                                d1 = math.hypot(self.dest_x - self.targ_x, cand_y1 - self.targ_y)
-                                d2 = math.hypot(self.dest_x - self.targ_x, cand_y2 - self.targ_y)
-
-                                if d1 >= 200 and d2 >= 200:
-                                    self.dest_y = cand_y1 if abs(cand_y1 - self.targ_y) > abs(cand_y2 - self.targ_y) else cand_y2
-                                elif d1 >= 200:
-                                    self.dest_y = cand_y1
-                                elif d2 >= 200:
-                                    self.dest_y = cand_y2
-                                else:
-                                    # 退化为原逻辑: 按 targ_y 高低选择
-                                    self.dest_y = cand_y1 if self.targ_y > 299 else cand_y2
+                            # self.dest_x = 149
+                            self.dest_y = 150 if self.targ_y > 299 else 450
+                            # self.dest_y = 375
 
                         cv2.drawMarker(vis, (int(xs.mean()), int(ys.mean())), (255, 0, 0), cv2.MARKER_CROSS, 12, 2)
                         cv2.rectangle(vis, (xs.min(), ys.min()), (xs.max(), ys.max()), (255, 0, 0), 2)
-                else:
-                    self.targ_x, self.targ_y = None, None
+                # else:
+                #     self.targ_x, self.targ_y = None, None
 
 
                 # 绘制检测区域边框
@@ -459,7 +465,9 @@ class PPTracker:
                 np.clip(xs, 0, 599, out=xs)
                 np.clip(ys, 0, 599, out=ys)
                 point_cloud[ys, xs] = 255
-        point_cloud[289:310, 289:310] = 0
+
+
+        point_cloud[280:320, 280:320] = 0
 
         return point_cloud
 
@@ -554,7 +562,7 @@ def main():
             print('开始冲线')
 
         end_time = time.time()
-        print(f"Time taken: {end_time - start_time:.2f} seconds")
+        # print(f"Time taken: {end_time - start_time:.2f} seconds")
 
     cv2.destroyAllWindows()
     # 结束 rplidar_node 子进程

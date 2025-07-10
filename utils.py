@@ -19,7 +19,7 @@ MINE3_COORD = (MINE3_X, MINE_Y)
 THRESHOLDS = [0, 225, 375, 600]
 RESULT_DEST = [150, 300, 450]
 MINE_RADIUS = 15
-MINE_DANGER_RADIUS = 75
+MINE_DANGER_RADIUS = 75     
 MINE_SIDE = 75
 
 class PIDController:
@@ -83,6 +83,10 @@ def draw_map() -> np.ndarray:
     cv2.rectangle(_map, (510, 540), (599, 599), (128, 32, 32), -1)  # 终点
     cv2.line(_map, (0, 299), (599, 299), (255, 255, 255), 3)        # 中线
     cv2.rectangle(_map, (0, 0), (598, 598), (255, 255, 255), 3)     # 边框
+
+    # 中央矩形障碍区 (75,225)-(525,375)
+    cv2.rectangle(_map, (75, 225), (525, 375), (64, 64, 64), -1)   # 填充灰色
+    cv2.rectangle(_map, (75, 225), (525, 375), (255, 255, 255), 3) # 描边
 
     # 三个雷区
     for center in (MINE1_COORD, MINE2_COORD, MINE3_COORD):

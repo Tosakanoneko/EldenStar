@@ -120,10 +120,12 @@ class Detector:
         self.dpy = 0
         self.missing = True
 
-        self.pid_x = PIDController(Kp=4, Ki=1, Kd=6, output_limits=(-1500, 1500))
-        self.pid_y = PIDController(Kp=2, Ki=0.0, Kd=1, output_limits=(-1500, 1500))
+        self.pid_far_x = PIDController(Kp=6, Ki=1, Kd=7, output_limits=(-1500, 1500))
+        self.pid_far_y = PIDController(Kp=2, Ki=0.0, Kd=1, output_limits=(-1500, 1500))
+        self.pid_near_x = PIDController(Kp=4, Ki=0.8, Kd=4, output_limits=(-1500, 1500))
+        self.pid_near_y = PIDController(Kp=1.5, Ki=0.1, Kd=0.1, output_limits=(-1500, 1500))
 
-    def process_frame(self, frame):
+    def track_point(self, frame, dist):
         """对单帧进行推理与可视化处理，返回处理后帧以及 (cx, cy)。"""
         results = self.model(frame, verbose=False)[0]
         
@@ -140,11 +142,17 @@ class Detector:
         else:
             self.missing = True
             print("missing,reset pid")
-            self.pid_x.reset()
-            self.pid_y.reset()
+            self.pid_far_x.reset()
+            self.pid_far_y.reset()
+            self.pid_near_x.reset()
+            self.pid_near_y.reset()
 
-        self.dpx = int(self.pid_x.update(dpx))
-        self.dpy = int(self.pid_y.update(dpy))
+        if dist > 250:
+            self.dpx = int(self.pid_far_x.update(dpx))
+            self.dpy = int(self.pid_far_y.update(dpy))
+        else:
+            self.dpx = int(self.pid_near_x.update(dpx))
+            self.dpy = int(self.pid_near_y.update(dpy))
 
         cv2.putText(frame, f"dpx: {self.dpx}, dpy: {self.dpy}", (frame.shape[1] - 200, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 1, cv2.LINE_AA)
         
@@ -160,7 +168,7 @@ def main():
         if frame is None:
             continue
 
-        frame = detector.process_frame(frame)
+        frame = detector.track_point(frame, 300)
 
         cv2.imshow("YOLOv11-Seg 实时分割", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
