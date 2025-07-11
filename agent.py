@@ -67,7 +67,7 @@ class SlaveDeviceAgent:
             "r2": 0,
         }
         self.ser = serial.Serial(port='/dev/ttyTHS1', baudrate=115200, timeout=0.01) # ttyCH341USB0
-        self.lidar_searching_pid = PIDController(Kp=20, Ki=1, Kd=0, output_limits=(-1500, 1500))
+        self.lidar_searching_pid = PIDController(Kp=10, Ki=0, Kd=0, output_limits=(-1500, 1500))
         self.lidar_found = False
 
         self.short2enemy_pid = PIDController(Kp=1, Ki=0, Kd=0, output_limits=(100, 100))
@@ -103,8 +103,8 @@ class SlaveDeviceAgent:
         self.send_data["py"] = 0
     
     def short2enemy(self, rel_car_angle):
-        self.send_data["dr1"] = rel_car_angle
-        # self.send_data["dr1"] = 0
+        # self.send_data["dr1"] = rel_car_angle
+        self.send_data["dr1"] = 180
     
     def close_sd(self):
         self.ser.close()

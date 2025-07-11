@@ -57,7 +57,7 @@ def main():
     while True:
         frame = client.rcv_frame()
         if frame is None:
-            pass
+            continue
 
         if pptracker.targ_x is not None and pptracker.targ_y is not None:
             dist = math.sqrt((pptracker.targ_x-pptracker.self_lidar_x)**2 + (pptracker.targ_y-pptracker.self_lidar_y)**2)
@@ -85,16 +85,25 @@ def main():
 
         point_cloud = pptracker.map_cloud(lidar_agent.points)
         lidar_processed = pptracker.navi(point_cloud)
-        pptracker.abs_gimble = float(sd_agent.recv_data["r2"])+pptracker.prev_angle
+        print("r2", sd_agent.recv_data["r2"])
+        abs_gimble = float(sd_agent.recv_data["r2"])+pptracker.prev_angle
+        while abs_gimble > 180:
+            abs_gimble -= 360
+        while abs_gimble <= -180:
+            abs_gimble += 360
+        pptracker.abs_gimble = abs_gimble
         pptracker.abs_self2enemyR = pptracker.get_relative_angle(pptracker.prev_angle)+pptracker.prev_angle
         pptracker.rel_gimble2enemyR = pptracker.abs_self2enemyR-pptracker.abs_gimble
 
-
-        sd_agent.short2enemy(pptracker.abs_self2enemyR)
+        # sd_agent.short2enemy(pptracker.abs_self2enemyR)
+        if pptracker.self_lidar_y < 299:
+            sd_agent.send_data["dr1"] =175
+        else:
+            sd_agent.send_data["dr1"] = 0
 
         if pptracker.path_point is not None:
-            sd_agent.send_data["dx"] = (pptracker.path_point[0] - pptracker.self_lidar_x)*-4
-            sd_agent.send_data["dy"] = (pptracker.path_point[1] - pptracker.self_lidar_y)*-4
+            sd_agent.send_data["dx"] = (pptracker.path_point[0] - pptracker.self_lidar_x)*-1
+            sd_agent.send_data["dy"] = (pptracker.path_point[1] - pptracker.self_lidar_y)*-1
             print("dx,dy,dr1", sd_agent.send_data["dx"], sd_agent.send_data["dy"], sd_agent.send_data["dr1"])
         else:
             sd_agent.send_data["dx"] = 0
@@ -103,6 +112,7 @@ def main():
         if detector.missing:
             sd_agent.lidar_searching(pptracker.rel_gimble2enemyR)
         else:
+            sd_agent.lidar_searching_pid.reset()
             sd_agent.send_data["px"] = detector.dpx  # 误差
             sd_agent.send_data["py"] = detector.dpy  # 误差
         
@@ -127,6 +137,7 @@ def main():
         lidar_proc.terminate()
         lidar_proc.join()
     rclpy.shutdown()
+
 
 if __name__ == "__main__":
     multiprocessing.set_start_method("spawn", force=True)

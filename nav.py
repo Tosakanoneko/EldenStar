@@ -16,11 +16,11 @@ class PPTracker:
         self.ref_side   = None         # 参考边长
         self.prev_corners = None
         self.prev_center = None
-        self.center_alpha = 0.3   # 中心位置滤波系数
+        self.center_alpha = 0.6   # 中心位置滤波系数
         self.self_lidar_x, self.self_lidar_y = 300, 300
         self.targ_x, self.targ_y = 299, 399
         self.dest_x, self.dest_y = 0, 0
-        self.wall_width = -20
+        self.wall_width = -20 #-20
         self.abs_gimble = 0.0
         self.abs_self2enemyR = 0.0
         self.rel_gimble2enemyR = 0.0
@@ -160,7 +160,7 @@ class PPTracker:
             if (x - self.targ_x) ** 2 + (y - self.targ_y) ** 2 <= 100 ** 2:
                 return True
         # 新增：中央矩形障碍区 (75,225)-(525,375)
-        if 65 <= x <= 535 and 215 <= y <= 385:
+        if 65 <= x <= 535 and 200 <= y <= 400:
             return True
         return False
 
@@ -227,15 +227,17 @@ class PPTracker:
         return []
 
     def _update_path(self):
-        """当起点或终点变化时重新规划路径。"""
+        """当目标变化时重新规划路径（起点移动不触发重规划）。"""
         if self.dest_x is None or self.dest_y is None:
             self.path = []
             self.path_smooth = []
             return
+
         start = (self.self_lidar_x, self.self_lidar_y)
         goal  = (self.dest_x, self.dest_y)
-        if start == self._prev_self and goal == self._prev_dest:
-            return  # 无变化，无需重新规划
+        # 仅当目标位置发生变化时才重新规划路径（保持首次规划结果）
+        if goal == self._prev_dest and self.path:
+            return  # 目标未变且已有路径，无需重新规划
         raw_path = self._astar(start, goal)
         self.path = self._chaikin(raw_path, 1) if raw_path else []
         # 按固定步距对平滑后的路径进行抽样, 进一步减少路径点数量
@@ -246,6 +248,13 @@ class PPTracker:
 
     def _update_path_point(self):
         """寻找 self.path 中距离车辆最近且位于车辆外的点，写入 self.path_point。"""
+        # 如果车辆已到达（或接近）当前目的地，则不再给出路径点
+        # 判定阈值取网格步长 grid_step 的一倍，可根据需要调整
+        if self.dest_x is not None and self.dest_y is not None:
+            if math.hypot(self.self_lidar_x - self.dest_x,
+                          self.self_lidar_y - self.dest_y) <= self.grid_step*5:
+                self.path_point = None
+                return
         if not self.path:
             self.path_point = None
             return
@@ -265,16 +274,23 @@ class PPTracker:
         # 若所有路径点均在车辆自身区域内, 则回退到最后一个路径点
         if closest is None:
             self.path_point = self.path[-1]
+            # 移除已经走过的路径点，仅保留当前位置之后的点
+            self.path = self.path[-1:]
             return
         # 如果最近点距离过近且存在下一有效路径点, 直接指向下一个
-        if min_dist_sq < 4:
+        if min_dist_sq < 16:
             next_idx = closest_idx + 1
             while next_idx < len(self.path) and self._in_self_region(*self.path[next_idx]):
                 next_idx += 1
             if next_idx < len(self.path):
                 self.path_point = self.path[next_idx]
+                # 移除已经走过的路径点，仅保留当前位置之后的点
+                self.path = self.path[next_idx:]
                 return
         self.path_point = closest
+        # 移除已经走过的路径点，仅保留当前位置之后的点
+        if closest_idx > 0:
+            self.path = self.path[closest_idx:]
 
     def _chaikin(self, pts, iterations=2):
         """对路径应用 Chaikin 曲线算法以平滑折线。"""
@@ -314,7 +330,7 @@ class PPTracker:
         """
         corners_raw, raw_angle, raw_side = self._fit_rotated_square(gray)
         vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        cv2.imshow("gray", gray)
+        # cv2.imshow("gray", gray)
         if corners_raw is None or raw_side is None or raw_angle is None:
             return vis
 
@@ -401,7 +417,12 @@ class PPTracker:
                 num_labels, labels = cv2.connectedComponents(dilated)
 
                 if num_labels > 1:
-                    sizes = [np.sum(labels == i) for i in range(1, num_labels)]
+                    # 若面积大于100则跳过
+                    # for i in range(1, num_labels):
+                    #     if np.sum(labels == i) > 20:
+                    #         continue
+                    
+                    sizes = [np.sum(labels == i) if np.sum(labels == i) >= 20 else 0 for i in range(1, num_labels)]
                     max_idx = int(np.argmax(sizes)) + 1
 
                     ys, xs = np.where(labels == max_idx)
@@ -514,8 +535,8 @@ def main():
     lidar_agent   = LidarAgent()
     pptracker = PPTracker()
 
-    cv2.namedWindow('frame', cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty('frame', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+    # cv2.namedWindow('frame', cv2.WINDOW_NORMAL)
+    # cv2.setWindowProperty('frame', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
 
     while True:
         start_time = time.time()
@@ -525,6 +546,21 @@ def main():
         point_cloud = pptracker.map_cloud(lidar_agent.points)
 
         frame = pptracker.navi(point_cloud)
+        print("r2", sd_agent.recv_data["r2"])
+        abs_gimble = float(sd_agent.recv_data["r2"])+pptracker.prev_angle
+        while abs_gimble > 180:
+            abs_gimble -= 360
+        while abs_gimble <= -180:
+            abs_gimble += 360
+        pptracker.abs_gimble = abs_gimble
+        pptracker.abs_self2enemyR = pptracker.get_relative_angle(pptracker.prev_angle)+pptracker.prev_angle
+        pptracker.rel_gimble2enemyR = pptracker.abs_self2enemyR-pptracker.abs_gimble
+        while pptracker.rel_gimble2enemyR > 180:
+            pptracker.rel_gimble2enemyR -= 360
+        while pptracker.rel_gimble2enemyR <= -180:
+            pptracker.rel_gimble2enemyR += 360
+        sd_agent.lidar_searching(pptracker.rel_gimble2enemyR)
+        print("rel_gimble2enemyR", pptracker.rel_gimble2enemyR)
         
 
         # agent.send_packet(data)
@@ -532,12 +568,15 @@ def main():
         vis_map = pptracker._map.copy()
         vis_map = draw_entity(vis_map, pptracker, pptracker.abs_gimble)
 
-        pptracker.abs_self2enemyR = pptracker.get_relative_angle(pptracker.prev_angle)+pptracker.prev_angle
-        sd_agent.short2enemy(pptracker.abs_self2enemyR)
+        # sd_agent.short2enemy(pptracker.abs_self2enemyR)
+        if pptracker.self_lidar_y < 299:
+            sd_agent.send_data["dr1"] = 179
+        else:
+            sd_agent.send_data["dr1"] = 0
         # print(sd_agent.send_data["dr1"])
         if pptracker.path_point is not None:
-            sd_agent.send_data["dx"] = (pptracker.path_point[0] - pptracker.self_lidar_x)*-4
-            sd_agent.send_data["dy"] = (pptracker.path_point[1] - pptracker.self_lidar_y)*-4
+            sd_agent.send_data["dx"] = (pptracker.path_point[0] - pptracker.self_lidar_x)*-2
+            sd_agent.send_data["dy"] = (pptracker.path_point[1] - pptracker.self_lidar_y)*-2
             print("dx,dy,dr1", sd_agent.send_data["dx"], sd_agent.send_data["dy"], sd_agent.send_data["dr1"])
         else:
             sd_agent.send_data["dx"] = 0
@@ -548,8 +587,8 @@ def main():
 
         combined = np.hstack((frame, vis_map))
         combined = cv2.resize(combined, (750, 375))
-        cv2.imshow('frame', combined)
-        cv2.setWindowProperty('frame', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+        # cv2.imshow('frame', combined)
+        # cv2.setWindowProperty('frame', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
 
         key = cv2.waitKey(1)
         if key == 27:                       # Esc → 退出
@@ -570,6 +609,41 @@ def main():
         lidar_proc.terminate()
         lidar_proc.join()
     rclpy.shutdown()
+
+def test_lidar():
+    rclpy.init()
+    multiprocessing.set_start_method("spawn", force=True)
+    lidar_proc = multiprocessing.Process(target=start_rplidar_node, daemon=True)
+    lidar_proc.start()
+
+    sd_agent = SlaveDeviceAgent()
+
+    send_json_thread = threading.Thread(target=sd_agent.send_json)
+    send_json_thread.daemon = True
+    send_json_thread.start()
+
+    recv_json_thread = threading.Thread(target=sd_agent.recv_json)
+    recv_json_thread.daemon = True
+    recv_json_thread.start()
+
+
+    lidar_agent   = LidarAgent()
+    pptracker = PPTracker()
+
+    while True:
+        # 处理一次雷达回调（非阻塞）
+        rclpy.spin_once(lidar_agent, timeout_sec=0.0)
+
+        point_cloud = pptracker.map_cloud(lidar_agent.points)
+
+        frame = pptracker.navi(point_cloud)
+        # sd_agent.send_data["dx"] = (299 - pptracker.self_lidar_x)*-
+        dy = 375-pptracker.self_lidar_y
+        print("225;", pptracker.self_lidar_y, dy)
+        sd_agent.send_data["dy"] = dy*-1
+        print("dx,dy:",sd_agent.send_data["dx"], sd_agent.send_data["dy"])
+
+
 
 if __name__ == '__main__':
     main()
